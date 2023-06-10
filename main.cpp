@@ -20,13 +20,17 @@ public:
     }
 };
 
+void test1(const std::vector<int>& vec, int x) {
+
+}
+
 int main() {
-    DEFINE_ASPECT(strlen);
-    size_t len = ASPECT(strlen)("hello world");
-    SMART_LOGD("len = %zd", len);
-    len = ASPECT_FUNC_INVOKE(strlen, "hello aspect");
+    size_t len = ASPECT_FUNC_INVOKE(strlen, "hello aspect");
     SMART_LOGD("len = %zd", len);
     AOTSample tester;
     DEFINE_ASPECT_OBJECT(tester);
+
+    ASPECT_FUNC_INVOKE(test1, std::vector<int>{}, 1);
+
     return ASPECT_OBJECT_INVOKE(tester, Test);
 }

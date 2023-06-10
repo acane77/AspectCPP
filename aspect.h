@@ -20,6 +20,16 @@ static std::string Demangle(const char* name) {
 
 #define SMART_LOGD(fmt, ...) printf("smart debug: " fmt "\n", ##__VA_ARGS__)
 
+struct AspectProxyDefaultAfter {
+    template <class ...Args>
+    void After(Args... args) { }
+};
+
+struct AspectProxyDefaultBefore {
+    template <class ...Args>
+    void Before(Args... args) { }
+};
+
 struct TimeLogger {
     template <class... Args>
     void Before(Args... args) {
@@ -43,7 +53,8 @@ struct TimeLogger {
 template <class T>
 struct is_printable {
     template <class T1>
-    static constexpr auto test(int) -> decltype(operator <<(std::declval<std::ostream>(), std::declval<T1>()), bool{}) {
+    static constexpr auto test(int) ->
+        decltype(operator <<(std::declval<std::ostream>(), std::declval<T1>()), bool{}) {
         return true;
     }
 
@@ -76,8 +87,12 @@ struct ParameterPrinter {
 
     template <class ReturnType>
     void After(ReturnType ret) {
-        std::cout << "smart debug: [Return value] " << ret << std::endl;
+        std::cout << "smart debug: [Return value] ";
+        std::cout << "(" << Demangle(typeid(ReturnType).name()) << ") ";
+        std::cout << ret << std::endl;
     }
+
+    void After() {  }
 
 private:
     template <class T>
@@ -89,7 +104,7 @@ private:
     Print(const T& val) { std::cout << " *** The value is not printable by std::ostream ***"; }
 };
 
-struct CodeProfiler {
+struct CodeProfiler : public AspectProxyDefaultAfter {
     template <class... Args>
     void Before(Args... args) { }
 
@@ -99,12 +114,9 @@ struct CodeProfiler {
         SMART_LOGD("[file        ] %s:%d", file, line);
         SMART_LOGD("[call from   ] %s", call_from);
     }
-
-    template <class ReturnType>
-    void After(ReturnType ret) { }
 };
 
-struct StackTrace {
+struct StackTrace : public AspectProxyDefaultAfter {
     template <class... Args>
     void Before(Args... args) { PrintStackStace(); }
 
@@ -128,21 +140,28 @@ struct StackTrace {
         void* buffer[50];
         int size = backtrace(buffer, 50);
         char** strings = backtrace_symbols(buffer, size);
-        SMART_LOGD("[Stack Trace ] =======================================");
+        SMART_LOGD("[============] =======================================");
 
+        const bool skip_first_frames = true;
+        int omitted = 0;
         for (int i = 0; i < size; ++i) {
             // Hide AspectProxy<> and StackTrace(this class) call stack
-            if (strstr(strings[i], "10StackTrace") || strstr(strings[i], "11AspectProxy")) {
-                continue;
+            if (skip_first_frames) {
+                if (strstr(strings[i], "10StackTrace") ||
+                    strstr(strings[i], "11AspectProxy") ||
+                    strstr(strings[i], "mem_fn") ||
+                    strstr(strings[i], "ZNSt3")) {
+                    omitted++;
+                    continue;
+                }
             }
+            //skip_first_frames = false;
             std::string trace = ProcessStackTrack(strings[i]);
             SMART_LOGD("[Stack Trace ] [#%-3d] %s", size - i - 1, trace.c_str());
         }
         free(strings);
+        //SMART_LOGD("[============] %d frames omitted", omitted);
     }
-
-    template <class ReturnType>
-    void After(ReturnType ret) { }
 
     void SetParams() { }
 
