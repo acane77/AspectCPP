@@ -4,9 +4,12 @@
 #include <memory>
 #include <tuple>
 #include <iostream>
+#include <functional>
+#include <type_traits>
 #include <execinfo.h>
 #include <vector>
 #include <cxxabi.h>
+#include <cstring>
 
 static std::string Demangle(const char* name) {
     int status = -4; // some arbitrary value to eliminate the compiler warning
@@ -104,10 +107,7 @@ private:
     Print(const T& val) { std::cout << " *** The value is not printable by std::ostream ***"; }
 };
 
-struct CodeProfiler : public AspectProxyDefaultAfter {
-    template <class... Args>
-    void Before(Args... args) { }
-
+struct CodeProfiler : public AspectProxyDefaultAfter, AspectProxyDefaultBefore {
     void SetParams(const char* function_name, const char* file, int line, const char* call_from) {
         SMART_LOGD("[============] =======================================");
         SMART_LOGD("[function    ] %s", function_name);
@@ -121,6 +121,17 @@ struct StackTrace : public AspectProxyDefaultAfter {
     void Before(Args... args) { PrintStackStace(); }
 
     std::string ProcessStackTrack(char* trace_str) {
+#ifdef __APPLE__
+        return ProcessStackTrackOSX(trace_str);
+#elif defined(__linux__)
+        return ProcessStackTrackLinux(trace_str);
+#else
+        return "";
+#endif
+    }
+
+#ifdef __APPLE__
+    std::string ProcessStackTrackOSX(char* trace_str) {
         std::string trace;
         int group = 0;
         while (*trace_str && group < 3) {
@@ -135,6 +146,38 @@ struct StackTrace : public AspectProxyDefaultAfter {
         *trace_str_end = 0;
         return Demangle(trace_str);
     }
+#endif
+
+#ifdef __linux__
+    std::string ProcessStackTrackLinux(char* trace_str) {
+        // ./aspect(_ZSt8__invokeIRKM9AOTSampleFivEJRPS0_EENSt15__invoke_resultIT_JDpT0_EE4typeEOS8_DpOS9_+0x38) [0xaaaad5e50364]
+        while (*trace_str && *trace_str != '(') trace_str++;
+        trace_str++;
+        char* trace_str_end = trace_str;
+        while (*trace_str_end && *trace_str_end != '+' && *trace_str_end != ')') trace_str_end++;
+        *trace_str_end = 0;
+        return Demangle(trace_str);
+    }
+#endif
+
+    std::string Addr2Line(char* trace_str) {
+        // Step 1: open pipe to addr2line
+        FILE* pipe = popen("addr2line -f -C -a -e ./aspect", "w");
+        if (!pipe) {
+            return trace_str;
+        }
+
+        // Step 2: write addresses to stdin
+        fprintf(pipe, "%p\n", trace_str);
+
+        // Step 3: read symbols from addr2line, print to stdout
+        char buffer[256];
+        fgets(buffer, sizeof(buffer), pipe);
+
+        // Step 4: close pipe and clean up
+        pclose(pipe);
+        return buffer;
+    }
 
     void PrintStackStace() {
         void* buffer[50];
@@ -147,16 +190,25 @@ struct StackTrace : public AspectProxyDefaultAfter {
         for (int i = 0; i < size; ++i) {
             // Hide AspectProxy<> and StackTrace(this class) call stack
             if (skip_first_frames) {
-                if (strstr(strings[i], "10StackTrace") ||
-                    strstr(strings[i], "11AspectProxy") ||
+                if (
+#ifdef __APPLE__
                     strstr(strings[i], "mem_fn") ||
-                    strstr(strings[i], "ZNSt3")) {
+                    strstr(strings[i], "ZNSt") ||
+#elif defined(__linux__)
+                    strstr(strings[i], "St13__invoke") ||
+                    strstr(strings[i], "St8__invoke") ||
+                    strstr(strings[i], "ZNKSt") ||
+#endif
+                    strstr(strings[i], "10StackTrace") ||
+                    strstr(strings[i], "11AspectProxy")) {
                     omitted++;
                     continue;
                 }
             }
             //skip_first_frames = false;
             std::string trace = ProcessStackTrack(strings[i]);
+            if (trace.empty())
+                continue;
             SMART_LOGD("[Stack Trace ] [#%-3d] %s", size - i - 1, trace.c_str());
         }
         free(strings);
@@ -177,6 +229,10 @@ struct function_helper<T(*)(Args...)> {
 };
 
 template <class T, class ...Args>
+struct function_helper<T(*)(Args...) noexcept> :
+        public function_helper<T(*)(Args...)> { };
+
+template <class T, class ...Args>
 struct function_helper<std::function<T(Args...)>> {
     using return_type = T;
     using arguments = std::tuple<Args...>;
@@ -188,6 +244,11 @@ struct function_helper<T(Args...)> {
     using arguments = std::tuple<Args...>;
 };
 
+template <class T, class ...Args>
+struct function_helper<T(Args...) noexcept> :
+        public function_helper<T(Args...)> { };
+
+
 template <class T, class C, class ...Args>
 struct function_helper<T (C::*)(Args...)> {
     using return_type = T;
@@ -196,13 +257,28 @@ struct function_helper<T (C::*)(Args...)> {
     using functional_type = std::function<T (Args...)>;
 };
 
+template <class T, class C, class ...Args>
+struct function_helper<T (C::*)(Args...) noexcept> :
+        public function_helper<T (C::*)(Args...)> { };
+
 template <class Func>
 struct return_type_is_void {
     constexpr const static bool value = std::is_same<typename function_helper<Func>::return_type, void>::value;
 };
 
+struct AspectProxyIsNotCopiable {
+    AspectProxyIsNotCopiable() = default;
+    AspectProxyIsNotCopiable(const AspectProxyIsNotCopiable&) = delete;
+    AspectProxyIsNotCopiable(AspectProxyIsNotCopiable&&) = delete;
+    AspectProxyIsNotCopiable(AspectProxyIsNotCopiable&) = delete;
+
+    AspectProxyIsNotCopiable& operator=(const AspectProxyIsNotCopiable&) = delete;
+    AspectProxyIsNotCopiable& operator=(AspectProxyIsNotCopiable&&) = delete;
+    AspectProxyIsNotCopiable& operator=(AspectProxyIsNotCopiable&) = delete;
+};
+
 template <class Type, class... Aspects>
-class AspectProxy {
+class AspectProxy : public AspectProxyIsNotCopiable {
 public:
     template <class ...Args>
     explicit AspectProxy(Args... args) { obj_holder_.reset(new Type(std::forward<Args>(args)...)); obj_ = obj_holder_.get(); }
@@ -357,6 +433,15 @@ private:
 
 struct function_aspect_helper {};
 
+template <typename T>
+struct remove_noexcept {
+    using type = T;
+};
+template <typename R, typename ...P>
+struct remove_noexcept<R(P...) noexcept> {
+    using type = R(P...);
+};
+
 template <class FuncType, class... Aspects>
 class FunctionAspectProxy : private AspectProxy<function_aspect_helper, Aspects...> {
 public:
@@ -381,7 +466,7 @@ public:
     }
 
 private:
-    std::function<FuncType> func_;
+    std::function<typename remove_noexcept<FuncType>::type> func_;
 };
 
 #define ENABLED_ASPECT ParameterPrinter, CodeProfiler, StackTrace, TimeLogger
